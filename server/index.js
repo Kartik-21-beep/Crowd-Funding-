@@ -300,36 +300,85 @@ app.get("/campaign/:id", async (req, res) => {
 });
 
 // Get campaigns created by logged-in user
-// Returns campaigns from MongoDB only (user-specific ownership data)
+// Uses blockchain as source of truth for campaign data (including progress)
+// MongoDB is only used for ownership tracking
 app.get("/my-campaigns", auth, async (req, res) => {
+  if (!contract) {
+    return res.json([]);
+  }
+  
   try {
     const userId = req.user;
-    const mongoose = (await import("mongoose")).default;
+    let userCampaignIds = [];
     
-    if (mongoose.connection.readyState !== 1) {
-      // MongoDB not connected - return empty
+    // Get user's campaign IDs from MongoDB (for ownership tracking only)
+    const mongoose = (await import("mongoose")).default;
+    if (mongoose.connection.readyState === 1) {
+      try {
+        const Campaign = (await import("./models/Campaign.js")).default;
+        const myCampaigns = await Campaign.find({ creator: userId, deleted: { $ne: true } })
+          .select("campaignId");
+        userCampaignIds = myCampaigns
+          .map(c => c.campaignId)
+          .filter(id => id != null && id !== undefined)
+          .map(id => Number(id));
+      } catch (dbErr) {
+        // MongoDB query failed - continue without ownership filter
+      }
+    }
+    
+    // If no campaigns found in MongoDB, return empty array
+    if (userCampaignIds.length === 0) {
       return res.json([]);
     }
     
-    const Campaign = (await import("./models/Campaign.js")).default;
-    const myCampaigns = await Campaign.find({ creator: userId, deleted: { $ne: true } })
-      .select("-__v")
-      .sort({ createdAt: -1 }); // Most recent first
+    // Fetch all campaigns from blockchain (source of truth)
+    let totalBn;
+    try {
+      totalBn = await contract.campaignCount();
+    } catch (countErr) {
+      return res.json([]);
+    }
     
-    // Format MongoDB data to match frontend expectations
-    const formattedCampaigns = myCampaigns.map(campaign => ({
-      id: campaign.campaignId || campaign._id,
-      title: campaign.title || "Untitled Campaign",
-      description: campaign.description || "No description",
-      goal: campaign.targetEth?.toString() || "0",
-      raised: campaign.raisedEth?.toString() || "0", // Synced from blockchain after donations
-      deadline: campaign.createdAt ? Math.floor(new Date(campaign.createdAt).getTime() / 1000).toString() : "0",
-      txHash: campaign.txHash,
-      createdAt: campaign.createdAt,
-    }));
+    const total = Number(totalBn);
+    if (isNaN(total) || total < 0 || total === 0) {
+      return res.json([]);
+    }
     
-    res.json(formattedCampaigns);
+    const blockchainCampaigns = [];
+    
+    // Fetch campaigns from blockchain - only those owned by this user
+    for (let i = 1; i <= total; i++) {
+      // Only fetch campaigns that belong to this user
+      if (!userCampaignIds.includes(i)) {
+        continue;
+      }
+      
+      try {
+        // Use getCampaign() function to get latest data from blockchain
+        const result = await contract.getCampaign(BigInt(i));
+        const [creator, title, description, goal, deadline, amountCollected] = result;
+        
+        blockchainCampaigns.push({
+          id: i,
+          owner: creator,
+          title: title || "Untitled Campaign",
+          description: description || "No description",
+          goal: ethers.formatEther(goal || 0n),
+          raised: ethers.formatEther(amountCollected || 0n), // Latest from blockchain
+          deadline: deadline ? deadline.toString() : "0",
+        });
+      } catch (err) {
+        // Skip if campaign doesn't exist
+      }
+    }
+    
+    // Sort by ID descending (most recent first)
+    blockchainCampaigns.sort((a, b) => b.id - a.id);
+    
+    res.json(blockchainCampaigns);
   } catch (err) {
+    console.error("❌ Error fetching my campaigns:", err.message);
     res.status(500).json({ error: "Could not fetch your campaigns" });
   }
 });

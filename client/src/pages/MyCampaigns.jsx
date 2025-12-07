@@ -1,26 +1,51 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import api from "../utils/api";
 import CampaignCard from "../components/CampaignCard";
 
 const MyCampaigns = () => {
   const [campaigns, setCampaigns] = useState([]);
   const [loading, setLoading] = useState(true);
+  const location = useLocation();
+
+  const loadMyCampaigns = async () => {
+    try {
+      setLoading(true);
+      const res = await api.get("/my-campaigns");
+      setCampaigns(res.data);
+    } catch (err) {
+      setCampaigns([]);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    const loadMyCampaigns = async () => {
-      try {
-        setLoading(true);
-        const res = await api.get("/my-campaigns");
-        setCampaigns(res.data);
-      } catch (err) {
-        setCampaigns([]);
-      } finally {
-        setLoading(false);
-      }
+    loadMyCampaigns();
+  }, []);
+
+  // Refresh when navigating to this page to show updated progress from blockchain
+  useEffect(() => {
+    if (location.pathname === "/my-campaigns") {
+      const timer = setTimeout(() => {
+        loadMyCampaigns();
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, [location.key, location.pathname]);
+
+  // Listen for donation completion events
+  useEffect(() => {
+    const handleDonationComplete = () => {
+      setTimeout(() => {
+        loadMyCampaigns();
+      }, 1500);
     };
 
-    loadMyCampaigns();
+    window.addEventListener("donation-complete", handleDonationComplete);
+    return () => {
+      window.removeEventListener("donation-complete", handleDonationComplete);
+    };
   }, []);
 
   if (loading) {
